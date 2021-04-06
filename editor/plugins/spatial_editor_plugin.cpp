@@ -2647,8 +2647,10 @@ void SpatialEditorViewport::_draw() {
 	}
 
 	if (_edit.mode == TRANSFORM_ROTATE) {
-
+		VisualServer::get_singleton()->instance_set_visible(rotate_gizmo_instance[4], true);
 		Point2 center = _point_to_screen(_edit.center);
+
+		// TODO: update angle uniform of the rotation plane here 
 
 		Color handle_color;
 		switch (_edit.plane) {
@@ -2669,14 +2671,19 @@ void SpatialEditorViewport::_draw() {
 		const float brightness = 1.3;
 		handle_color *= Color(brightness, brightness, brightness);
 
-		VisualServer::get_singleton()->canvas_item_add_line(
-				ci,
-				_edit.mouse_pos,
-				center,
-				handle_color,
-				Math::round(2 * EDSCALE),
-				true);
+		// VisualServer::get_singleton()->canvas_item_add_line(
+		// 		ci,
+		// 		_edit.mouse_pos,
+		// 		center,
+		// 		handle_color,
+		// 		Math::round(2 * EDSCALE),
+		// 		true);
+	} else {
+		// Hide rotation plane
+		VisualServer::get_singleton()->instance_set_visible(rotate_gizmo_instance[4], false);
 	}
+
+
 	if (previewing) {
 
 		Size2 ss = Size2(ProjectSettings::get_singleton()->get("display/window/size/width"), ProjectSettings::get_singleton()->get("display/window/size/height"));
@@ -3123,6 +3130,13 @@ void SpatialEditorViewport::_init_gizmo_instance(int p_idx) {
 	VS::get_singleton()->instance_set_visible(rotate_gizmo_instance[3], false);
 	VS::get_singleton()->instance_geometry_set_cast_shadows_setting(rotate_gizmo_instance[3], VS::SHADOW_CASTING_SETTING_OFF);
 	VS::get_singleton()->instance_set_layer_mask(rotate_gizmo_instance[3], layer);
+
+	rotate_gizmo_instance[4] = VS::get_singleton()->instance_create();
+	VS::get_singleton()->instance_set_base(rotate_gizmo_instance[4], spatial_editor->get_rotate_gizmo(4)->get_rid());
+	VS::get_singleton()->instance_set_scenario(rotate_gizmo_instance[4], get_tree()->get_root()->get_world()->get_scenario());
+	VS::get_singleton()->instance_set_visible(rotate_gizmo_instance[4], false);
+	VS::get_singleton()->instance_geometry_set_cast_shadows_setting(rotate_gizmo_instance[4], VS::SHADOW_CASTING_SETTING_OFF);
+	VS::get_singleton()->instance_set_layer_mask(rotate_gizmo_instance[4], layer);
 }
 
 void SpatialEditorViewport::_finish_gizmo_instances() {
@@ -3137,6 +3151,9 @@ void SpatialEditorViewport::_finish_gizmo_instances() {
 
 	// Rotation white outline
 	VS::get_singleton()->free(rotate_gizmo_instance[3]);
+
+	// Rotation plane
+	VS::get_singleton()->free(rotate_gizmo_instance[4]);
 }
 void SpatialEditorViewport::_toggle_camera_preview(bool p_activate) {
 
@@ -3234,6 +3251,9 @@ void SpatialEditorViewport::update_transform_gizmo_view() {
 		// Rotation white outline
 		VisualServer::get_singleton()->instance_set_visible(rotate_gizmo_instance[3], false);
 
+		// Rotation plane
+		VisualServer::get_singleton()->instance_set_visible(rotate_gizmo_instance[4], false);
+
 		return;
 	}
 
@@ -3274,6 +3294,17 @@ void SpatialEditorViewport::update_transform_gizmo_view() {
 	// Rotation white outline
 	VisualServer::get_singleton()->instance_set_transform(rotate_gizmo_instance[3], xform);
 	VisualServer::get_singleton()->instance_set_visible(rotate_gizmo_instance[3], spatial_editor->is_gizmo_visible() && (spatial_editor->get_tool_mode() == SpatialEditor::TOOL_MODE_SELECT || spatial_editor->get_tool_mode() == SpatialEditor::TOOL_MODE_ROTATE));
+
+	// Rotation plane
+	Transform rot_plane_xform = xform;
+	if (_edit.mode == TRANSFORM_ROTATE) {
+		if (_edit.plane == TRANSFORM_X_AXIS) {
+			rot_plane_xform.basis.rotate_local(Vector3(0, 0, 1), Math::deg2rad(90.0));
+		} else if (_edit.plane == TRANSFORM_Z_AXIS) {
+			rot_plane_xform.basis.rotate_local(Vector3(1, 0, 0), Math::deg2rad(90.0));
+		}
+	}
+	VisualServer::get_singleton()->instance_set_transform(rotate_gizmo_instance[4], rot_plane_xform);
 }
 
 void SpatialEditorViewport::set_state(const Dictionary &p_state) {
@@ -5237,6 +5268,55 @@ void SpatialEditor::_init_indicators() {
 	{
 
 		//move gizmo
+
+		const float rot_plane_scale = 2.1;
+		Ref<SurfaceTool> st = memnew(SurfaceTool);
+		st->begin(Mesh::PRIMITIVE_TRIANGLES);
+
+		st->add_uv(Vector2(0, 1));
+		st->add_vertex(Vector3(-0.5, 0, 0.5)*rot_plane_scale);
+		st->add_uv(Vector2(1, 1));
+		st->add_vertex(Vector3(0.5, 0, 0.5)*rot_plane_scale);
+		st->add_uv(Vector2(1, 0));
+		st->add_vertex(Vector3(0.5, 0, -0.5)*rot_plane_scale);
+		st->add_uv(Vector2(0, 0));
+		st->add_vertex(Vector3(-0.5, 0, -0.5)*rot_plane_scale);
+
+		st->add_index(0);
+		st->add_index(1);
+		st->add_index(3);
+		st->add_index(1);
+		st->add_index(2);
+		st->add_index(3);
+		Array plane_data = st->commit_to_arrays();
+
+		Ref<Shader> plane_rot_shader = memnew(Shader);
+		plane_rot_shader->set_code(
+				"\n"
+				"shader_type spatial; \n"
+				"render_mode unshaded, depth_test_disable, cull_disabled; \n"
+				"uniform vec4 albedo; \n"
+				"uniform float angle_start; \n"
+				"uniform float angle_end; \n"
+				"\n"
+				"float circle(vec2 position, float radius) { return 1.0-smoothstep(radius, radius + 0.005, length(position - vec2(0.5))); }"
+				"\n"
+				"void vertex() { \n"
+				"} \n"
+				"\n"
+				"void fragment() { \n"
+				" 	  \n"
+				"	ALBEDO = vec3(1.0, 1.0, 1.0); \n"
+				"	ALPHA = circle(UV, 0.5) * 0.15; \n"
+				"}");
+
+		Ref<ShaderMaterial> rotate_plane_mat = memnew(ShaderMaterial);
+		rotate_plane_mat->set_render_priority(Material::RENDER_PRIORITY_MAX);
+		rotate_plane_mat->set_shader(plane_rot_shader);
+
+		rotate_gizmo[4] = Ref<ArrayMesh>(memnew(ArrayMesh));
+		rotate_gizmo[4]->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, plane_data);
+		rotate_gizmo[4]->surface_set_material(0, rotate_plane_mat);
 
 		for (int i = 0; i < 3; i++) {
 
